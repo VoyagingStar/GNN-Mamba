@@ -4,7 +4,7 @@
 
 GNN-Mamba is a novel spectral prediction framework that effectively alleviates the capability bottlenecks of existing methods in characterizing complex molecular fragmentation pathways by integrating local atomic chemical environments with global molecular topological information. 
 
-`![Framework of GNN-Mamba](./images/GNN-Mamba.png)`)
+`![Framework of GNN-Mamba](./images/GNN-Mamba.png)`
 > **Fig. 1** | Framework of the GNN-Mamba Spectrum Prediction Model.
 
 
