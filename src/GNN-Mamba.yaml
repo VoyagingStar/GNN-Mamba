@@ -1,0 +1,28 @@
+data_d : {
+    "data_dir": "data",
+    "inst_type": ["QTOF", "Orbitrap", "others"],
+    "adduct": ["[M+H]+", "[M+Na]+", "[M+H-H2O]+"],
+    "mz_bin_res": 0.1,
+    "mz_max": 1000,
+    "preproc_ce": "normalize",
+    "ints_thresh": 0.001
+}
+
+run_d : {
+    "batch_size": 64,
+    "num_workers": 2,
+    "num_epochs": 200,
+    "seed" : 666,
+    "lr": 0.0001,
+    "weight_decay": 0.0001,
+    "save_dir": "checkpoints",
+    "plot_dir": "plots",
+    "log_dir": "logs",
+    "mamba_lr_scale": 0.5,        
+    "use_seg_head": True,       
+    "n_mamba_layers": 2,        
+    "gnn_type": "GCN",              # GCN or GAT
+    "cov_thr_true_rel": 0.01,
+    "cov_thr_pred_rel": 0.1
+
+}

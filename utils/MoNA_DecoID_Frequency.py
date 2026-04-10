@@ -1,0 +1,325 @@
+from pathlib import Path
+import pandas as pd
+
+
+# =========================
+# User-editable parameters
+# =========================
+INPUT_CSV = Path(r"E:\model\singlecell\results\HGC\0330\MoNA_DecoID\decoid_library_weights_all_queries.csv")
+OUTPUT_DIR = Path(r"E:\model\singlecell\results\HGC\0330\MoNA_DecoID\data")
+
+MATCH_THRESHOLDS = [1, 4, 6]
+
+SUMMARY_FILE = "cell_annotation_count_summary_by_threshold.csv"
+OCCURRENCE_FILE_T1 = "annotated_inchikey_occurrence_nmatched_ge1.csv"
+OCCURRENCE_FILE_T4 = "annotated_inchikey_occurrence_nmatched_ge4.csv"
+OCCURRENCE_FILE_T6 = "annotated_inchikey_occurrence_nmatched_ge6.csv"
+
+
+def standardize_bool(series: pd.Series) -> pd.Series:
+    """Convert common TRUE/FALSE-like values to pandas boolean."""
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(False)
+
+    mapping = {
+        "true": True,
+        "false": False,
+        "1": True,
+        "0": False,
+        "yes": True,
+        "no": False,
+        "y": True,
+        "n": False,
+        "t": True,
+        "f": False,
+    }
+    return (
+        series.astype(str)
+        .str.strip()
+        .str.lower()
+        .map(mapping)
+        .fillna(False)
+        .astype(bool)
+    )
+
+
+def resolve_column_names(df: pd.DataFrame) -> dict:
+    alias_map = {
+        "query_csv": ["query_csv"],
+        "precursor_mz": ["precursor_mz"],
+        "mona_id": ["mona_id"],
+        "spectrum_id": ["spectrum_id"],
+        "compound_name": ["compound_name"],
+        "inchikey": ["inchikey", "inchi_key"],
+        "smiles": ["smiles"],
+        "formula": ["formula"],
+        "best_adduct": ["best_adduct", "best_addu"],
+        "ion_mode": ["ion_mode"],
+        "instrument": ["instrument"],
+        "collision_energy": ["collision_energy", "collision_en"],
+        "source_file": ["source_file"],
+        "library_precursor_mz": ["library_precursor_mz"],
+        "initial_candidate_score": ["initial_candidate_score"],
+        "initial_candidate_n_matched": ["initial_candidate_n_matched"],
+        "lasso_weight_raw": ["lasso_weight_raw", "lasso_weight"],
+        "lasso_weight_normalized": ["lasso_weight_normalized", "lasso_weight_norm"],
+        "weight_rank": ["weight_rank"],
+        "is_active_component": ["is_active_component"],
+        "component_score": ["component_score"],
+    }
+
+    resolved = {}
+    columns = set(df.columns)
+
+    for canonical, candidates in alias_map.items():
+        found = next((c for c in candidates if c in columns), None)
+        if found is not None:
+            resolved[canonical] = found
+
+    required = {
+        "query_csv",
+        "inchikey",
+        "mona_id",
+        "spectrum_id",
+        "compound_name",
+        "best_adduct",
+        "precursor_mz",
+        "library_precursor_mz",
+        "initial_candidate_score",
+        "initial_candidate_n_matched",
+        "lasso_weight_raw",
+        "lasso_weight_normalized",
+        "weight_rank",
+        "is_active_component",
+        "component_score",
+    }
+
+    missing = sorted(required - set(resolved))
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    return resolved
+
+
+def rename_to_canonical(df: pd.DataFrame, resolved: dict) -> pd.DataFrame:
+    reverse_map = {actual: canonical for canonical, actual in resolved.items()}
+    return df.rename(columns=reverse_map).copy()
+
+
+def load_data(csv_path: Path) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    resolved = resolve_column_names(df)
+    df = rename_to_canonical(df, resolved)
+
+    df = df.copy()
+    df["query_csv"] = df["query_csv"].astype(str).str.strip()
+    df["is_active_component"] = standardize_bool(df["is_active_component"])
+    df["initial_candidate_n_matched"] = pd.to_numeric(
+        df["initial_candidate_n_matched"], errors="coerce"
+    )
+    df["initial_candidate_score"] = pd.to_numeric(df["initial_candidate_score"], errors="coerce")
+    df["precursor_mz"] = pd.to_numeric(df["precursor_mz"], errors="coerce")
+    df["library_precursor_mz"] = pd.to_numeric(df["library_precursor_mz"], errors="coerce")
+    df["lasso_weight_raw"] = pd.to_numeric(df["lasso_weight_raw"], errors="coerce")
+    df["lasso_weight_normalized"] = pd.to_numeric(df["lasso_weight_normalized"], errors="coerce")
+    df["weight_rank"] = pd.to_numeric(df["weight_rank"], errors="coerce")
+    df["component_score"] = pd.to_numeric(df["component_score"], errors="coerce")
+
+    df["inchikey"] = df["inchikey"].astype(str).str.strip()
+    df.loc[df["inchikey"].isin(["", "nan", "None", "none", "NaN"]), "inchikey"] = pd.NA
+
+    df["mona_id"] = df["mona_id"].astype(str).str.strip()
+    df.loc[df["mona_id"].isin(["", "nan", "None", "none", "NaN"]), "mona_id"] = pd.NA
+
+    df["spectrum_id"] = df["spectrum_id"].astype(str).str.strip()
+
+    return df
+
+
+def filter_annotated(df: pd.DataFrame, min_matched: int) -> pd.DataFrame:
+    """Definition of annotated:
+    - is_active_component == True
+    - initial_candidate_n_matched >= min_matched
+    - inchikey is not empty
+    """
+    return df[
+        (df["is_active_component"])
+        & (df["initial_candidate_n_matched"] >= min_matched)
+        & (df["inchikey"].notna())
+    ].copy()
+
+
+def build_count_summary(df: pd.DataFrame, thresholds: list[int]) -> pd.DataFrame:
+    """For each threshold, count deduplicated InChIKeys per query_csv, then compute
+    mean / variance / standard deviation across query_csv replicates.
+    """
+    records = []
+
+    for threshold in thresholds:
+        filtered = filter_annotated(df, threshold)
+
+        per_query = (
+            filtered.groupby("query_csv")["inchikey"]
+            .nunique()
+            .rename("annotated_unique_inchikey_count")
+            .reset_index()
+        )
+
+        all_queries = pd.DataFrame({"query_csv": sorted(df["query_csv"].dropna().unique())})
+        per_query = all_queries.merge(per_query, on="query_csv", how="left")
+        per_query["annotated_unique_inchikey_count"] = (
+            per_query["annotated_unique_inchikey_count"].fillna(0).astype(int)
+        )
+
+        count_series = per_query["annotated_unique_inchikey_count"]
+
+        records.append(
+            {
+                "min_initial_candidate_n_matched": threshold,
+                "n_query_csv_replicates": int(len(per_query)),
+                "mean_annotated_unique_inchikeys_per_query_csv": float(count_series.mean()),
+                "variance_annotated_unique_inchikeys_per_query_csv": float(count_series.var(ddof=1)),
+                "std_annotated_unique_inchikeys_per_query_csv": float(count_series.std(ddof=1)),
+                "min_count": int(count_series.min()),
+                "max_count": int(count_series.max()),
+            }
+        )
+
+        per_query_detail_path = OUTPUT_DIR / f"per_query_unique_inchikey_counts_nmatched_ge{threshold}.csv"
+        per_query.insert(0, "min_initial_candidate_n_matched", threshold)
+        per_query.to_csv(per_query_detail_path, index=False, encoding="utf-8-sig")
+
+    summary_df = pd.DataFrame(records)
+    return summary_df
+
+
+def choose_representative_values(group: pd.DataFrame) -> pd.Series:
+    """Pick representative metadata for one InChIKey.
+
+    Preference:
+    1) highest lasso_weight_normalized
+    2) highest initial_candidate_score
+    3) highest initial_candidate_n_matched
+    """
+    g = group.copy()
+
+    numeric_cols = [
+        "lasso_weight_raw",
+        "lasso_weight_normalized",
+        "weight_rank",
+        "initial_candidate_score",
+        "initial_candidate_n_matched",
+        "component_score",
+    ]
+    for col in numeric_cols:
+        if col in g.columns:
+            g[col] = pd.to_numeric(g[col], errors="coerce")
+
+    g = g.sort_values(
+        by=["lasso_weight_normalized", "initial_candidate_score", "initial_candidate_n_matched"],
+        ascending=[False, False, False],
+        na_position="last",
+    )
+    row = g.iloc[0]
+
+    return pd.Series(
+        {
+            "mona_id": row.get("mona_id"),
+            "spectrum_id": row.get("spectrum_id"),
+            "compound_name": row.get("compound_name"),
+            "best_adduct": row.get("best_adduct"),
+            "precursor_mz": row.get("precursor_mz"),
+            "library_precursor_mz": row.get("library_precursor_mz"),
+            "best_initial_candidate_score": g["initial_candidate_score"].max(),
+            "mean_initial_candidate_score": g["initial_candidate_score"].mean(),
+            "best_initial_candidate_n_matched": g["initial_candidate_n_matched"].max(),
+            "best_lasso_weight_raw": g["lasso_weight_raw"].max(),
+            "best_lasso_weight_normalized": g["lasso_weight_normalized"].max(),
+            "best_weight_rank": g["weight_rank"].min(),
+            "best_component_score": g["component_score"].max(),
+            "mean_component_score": g["component_score"].mean(),
+        }
+    )
+
+
+def build_occurrence_table(df: pd.DataFrame, min_matched: int) -> pd.DataFrame:
+    """Count in how many different query_csv each annotated InChIKey appears."""
+    filtered = filter_annotated(df, min_matched)
+
+    if filtered.empty:
+        return pd.DataFrame(
+            columns=[
+                "min_initial_candidate_n_matched",
+                "inchikey",
+                "compound_name",
+                "mona_id",
+                "spectrum_id",
+                "best_adduct",
+                "precursor_mz",
+                "library_precursor_mz",
+                "occurrence_query_csv_count",
+                "query_csv_list",
+                "best_initial_candidate_score",
+                "mean_initial_candidate_score",
+                "best_initial_candidate_n_matched",
+                "best_lasso_weight_raw",
+                "best_lasso_weight_normalized",
+                "best_weight_rank",
+                "best_component_score",
+                "mean_component_score",
+            ]
+        )
+
+    occurrence = (
+        filtered.groupby("inchikey")["query_csv"]
+        .agg(
+            occurrence_query_csv_count=lambda s: s.nunique(),
+            query_csv_list=lambda s: "; ".join(sorted(pd.unique(s))),
+        )
+        .reset_index()
+    )
+
+    value_columns = [c for c in filtered.columns if c != "inchikey"]
+    metadata = (
+        filtered.groupby("inchikey")[value_columns]
+        .apply(choose_representative_values)
+        .reset_index()
+    )
+
+    result = occurrence.merge(metadata, on="inchikey", how="left")
+    result = result.sort_values(
+        by=["occurrence_query_csv_count", "best_lasso_weight_normalized", "best_initial_candidate_score"],
+        ascending=[False, False, False],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    result.insert(0, "min_initial_candidate_n_matched", min_matched)
+    return result
+
+
+def main():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    df = load_data(INPUT_CSV)
+
+    summary_df = build_count_summary(df, MATCH_THRESHOLDS)
+    summary_path = OUTPUT_DIR / SUMMARY_FILE
+    summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
+
+    occurrence_t4 = build_occurrence_table(df, 4)
+    occurrence_t4.to_csv(OUTPUT_DIR / OCCURRENCE_FILE_T4, index=False, encoding="utf-8-sig")
+
+    occurrence_t6 = build_occurrence_table(df, 6)
+    occurrence_t6.to_csv(OUTPUT_DIR / OCCURRENCE_FILE_T6, index=False, encoding="utf-8-sig")
+
+    occurrence_t1 = build_occurrence_table(df, 1)
+    occurrence_t1.to_csv(OUTPUT_DIR / OCCURRENCE_FILE_T1, index=False, encoding="utf-8-sig")
+
+    print("Done.")
+    print(f"Summary: {summary_path}")
+    print(f"Occurrence >=1: {OUTPUT_DIR / OCCURRENCE_FILE_T1}")
+    print(f"Occurrence >=4: {OUTPUT_DIR / OCCURRENCE_FILE_T4}")
+    print(f"Occurrence >=6: {OUTPUT_DIR / OCCURRENCE_FILE_T6}")
+
+
+if __name__ == "__main__":
+    main()
