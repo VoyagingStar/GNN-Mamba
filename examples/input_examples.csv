@@ -1,3 +1,0 @@
-﻿name,smiles,instrument_type,collision_energy,adduct
-MassSpecGymID0014309,COC(=O)N(C1=CC=CC=C1COC2=NN(C=C2)C3=CC=C(C=C3)Cl)OC,Orbitrap,20,[M+H]+
-MassSpecGymID0002347,CC1=C(C(=O)N(N1C)C2=CC=CC=C2)NC=O,Orbitrap,13.926486,[M+H]+
